@@ -13,160 +13,164 @@
 
 #include "logger.h"
 
-struct Profile_Result {
-	std::string name;
+namespace {
 
-	std::chrono::duration<double, std::micro> start;
-	std::chrono::microseconds elapsedTime;
-	std::thread::id threadID;
-};
+	struct Profile_Result {
+		std::string name;
 
-struct Instrumentation_Session {
-	std::string name;
-};
+		std::chrono::duration<double, std::micro> start;
+		std::chrono::microseconds elapsedTime;
+		std::thread::id threadID;
+	};
 
-class Instrumentor {
-public:
-	Instrumentor(const Instrumentor&) = delete;
-	Instrumentor(Instrumentor&&) = delete;
+	struct Instrumentation_Session {
+		std::string name;
+	};
 
-	void beginSession(const std::string& name, const std::string& filepath = "results.json") {
-		std::lock_guard lock(m_mutex);
-		if (m_currentSession) {
-			Log::error("Instrumentor::beginSession('{0}') when session '{1}' already open.", name, m_currentSession->name);
+	class Instrumentor {
+	public:
+		Instrumentor(const Instrumentor&) = delete;
+		Instrumentor(Instrumentor&&) = delete;
+
+		void beginSession(const std::string& name, const std::string& filepath = "results.json") {
+			std::lock_guard lock(m_mutex);
+			if (m_currentSession) {
+				erika::Log::error("Instrumentor::beginSession('{0}') when session '{1}' already open.", name, m_currentSession->name);
+				internalEndSession();
+			}
+			m_outputStream.open(filepath);
+
+			if (m_outputStream.is_open()) {
+				m_currentSession = new Instrumentation_Session({name});
+				writeHeader();
+			}
+			else {
+					erika::Log::error("Instrumentor could not open results file '{0}'.", filepath);
+			}
+		}
+
+		void endSession() {
+			std::lock_guard lock(m_mutex);
 			internalEndSession();
 		}
-		m_outputStream.open(filepath);
 
-		if (m_outputStream.is_open()) {
-			m_currentSession = new Instrumentation_Session({name});
-			writeHeader();
+		void writeProfile(const Profile_Result& result) {
+			std::stringstream json;
+
+			json << std::setprecision(3) << std::fixed;
+			json << ",{";
+			json << "\"cat\":\"function\",";
+			json << "\"dur\":" << (result.elapsedTime.count()) << ',';
+			json << "\"name\":\"" << result.name << "\",";
+			json << "\"ph\":\"X\",";
+			json << "\"pid\":0,";
+			json << "\"tid\":" << result.threadID << ",";
+			json << "\"ts\":" << result.start.count();
+			json << "}";
+
+			std::lock_guard lock(m_mutex);
+			if (m_currentSession) {
+				m_outputStream << json.str();
+				m_outputStream.flush();
+			}
 		}
-		else {
-				Log::error("Instrumentor could not open results file '{0}'.", filepath);
+
+		static Instrumentor& get() {
+			static Instrumentor instance;
+			return instance;
 		}
-	}
 
-	void endSession() {
-		std::lock_guard lock(m_mutex);
-		internalEndSession();
-	}
+	private:
+		Instrumentor()
+			: m_currentSession(nullptr) {
+		}
 
-	void writeProfile(const Profile_Result& result) {
-		std::stringstream json;
+		~Instrumentor() {
+			endSession();
+		}		
 
-		json << std::setprecision(3) << std::fixed;
-		json << ",{";
-		json << "\"cat\":\"function\",";
-		json << "\"dur\":" << (result.elapsedTime.count()) << ',';
-		json << "\"name\":\"" << result.name << "\",";
-		json << "\"ph\":\"X\",";
-		json << "\"pid\":0,";
-		json << "\"tid\":" << result.threadID << ",";
-		json << "\"ts\":" << result.start.count();
-		json << "}";
-
-		std::lock_guard lock(m_mutex);
-		if (m_currentSession) {
-			m_outputStream << json.str();
+		void writeHeader() {
+			m_outputStream << R"({"otherData": {},"traceEvents":[{})";
 			m_outputStream.flush();
 		}
-	}
 
-	static Instrumentor& get() {
-		static Instrumentor instance;
-		return instance;
-	}
-
-private:
-	Instrumentor()
-		: m_currentSession(nullptr) {
-	}
-
-	~Instrumentor() {
-		endSession();
-	}		
-
-	void writeHeader() {
-		m_outputStream << R"({"otherData": {},"traceEvents":[{})";
-		m_outputStream.flush();
-	}
-
-	void writeFooter() {
-		m_outputStream << "]}";
-		m_outputStream.flush();
-	}
-
-	// Note: you must already own lock on m_mutex before
-	// calling internalEndSession()
-	void internalEndSession() {
-		if (m_currentSession) {
-			writeFooter();
-			m_outputStream.close();
-			delete m_currentSession;
-			m_currentSession = nullptr;
+		void writeFooter() {
+			m_outputStream << "]}";
+			m_outputStream.flush();
 		}
-	}
 
-	std::mutex m_mutex;
-	Instrumentation_Session* m_currentSession;
-	std::ofstream m_outputStream;
-};
-
-class Instrumentation_Timer
-{
-public:
-	Instrumentation_Timer(const char* name) 
-		: m_mame(name), m_Stopped(false) {
-		m_startTimepoint = std::chrono::steady_clock::now();
-	}
-
-	~Instrumentation_Timer() {
-		if (!m_Stopped) {
-			Stop();
+		// Note: you must already own lock on m_mutex before
+		// calling internalEndSession()
+		void internalEndSession() {
+			if (m_currentSession) {
+				writeFooter();
+				m_outputStream.close();
+				delete m_currentSession;
+				m_currentSession = nullptr;
+			}
 		}
+
+		std::mutex m_mutex;
+		Instrumentation_Session* m_currentSession;
+		std::ofstream m_outputStream;
+	};
+
+	class Instrumentation_Timer
+	{
+	public:
+		Instrumentation_Timer(const char* name) 
+			: m_mame(name), m_Stopped(false) {
+			m_startTimepoint = std::chrono::steady_clock::now();
+		}
+
+		~Instrumentation_Timer() {
+			if (!m_Stopped) {
+				Stop();
+			}
+		}
+
+		void Stop() {
+			auto endTimepoint = std::chrono::steady_clock::now();
+			auto highResStart = std::chrono::duration<double, std::micro>{ m_startTimepoint.time_since_epoch() };
+			auto elapsedTime = std::chrono::time_point_cast<std::chrono::microseconds>(endTimepoint).time_since_epoch() - std::chrono::time_point_cast<std::chrono::microseconds>(m_startTimepoint).time_since_epoch();
+
+			Instrumentor::get().writeProfile({ m_mame, highResStart, elapsedTime, std::this_thread::get_id() });
+
+			m_Stopped = true;
+		}
+
+	private:
+		const char* m_mame;
+		std::chrono::time_point<std::chrono::steady_clock> m_startTimepoint;
+		bool m_Stopped;
+	};
+
+	template <size_t N>
+	struct Change_Result {
+		char Data[N];
+	};
+
+	template <size_t N, size_t K>
+	constexpr auto cleanupOutputString(const char(&expr)[N], const char(&remove)[K]){
+		Change_Result<N> result = {};
+
+		size_t srcIndex = 0;
+		size_t dstIndex = 0;
+		while (srcIndex < N) {
+			size_t matchIndex = 0;
+			while (matchIndex < K - 1 && srcIndex + matchIndex < N - 1 && expr[srcIndex + matchIndex] == remove[matchIndex])
+				matchIndex++;
+			if (matchIndex == K - 1)
+				srcIndex += matchIndex;
+			result.Data[dstIndex++] = expr[srcIndex] == '"' ? '\'' : expr[srcIndex];
+			srcIndex++;
+		}
+		return result;
 	}
 
-	void Stop() {
-		auto endTimepoint = std::chrono::steady_clock::now();
-		auto highResStart = std::chrono::duration<double, std::micro>{ m_startTimepoint.time_since_epoch() };
-		auto elapsedTime = std::chrono::time_point_cast<std::chrono::microseconds>(endTimepoint).time_since_epoch() - std::chrono::time_point_cast<std::chrono::microseconds>(m_startTimepoint).time_since_epoch();
-
-		Instrumentor::get().writeProfile({ m_mame, highResStart, elapsedTime, std::this_thread::get_id() });
-
-		m_Stopped = true;
-	}
-
-private:
-	const char* m_mame;
-	std::chrono::time_point<std::chrono::steady_clock> m_startTimepoint;
-	bool m_Stopped;
-};
-
-template <size_t N>
-struct Change_Result {
-	char Data[N];
-};
-
-template <size_t N, size_t K>
-constexpr auto cleanupOutputString(const char(&expr)[N], const char(&remove)[K]){
-	Change_Result<N> result = {};
-
-	size_t srcIndex = 0;
-	size_t dstIndex = 0;
-	while (srcIndex < N) {
-		size_t matchIndex = 0;
-		while (matchIndex < K - 1 && srcIndex + matchIndex < N - 1 && expr[srcIndex + matchIndex] == remove[matchIndex])
-			matchIndex++;
-		if (matchIndex == K - 1)
-			srcIndex += matchIndex;
-		result.Data[dstIndex++] = expr[srcIndex] == '"' ? '\'' : expr[srcIndex];
-		srcIndex++;
-	}
-	return result;
 }
 
-#if PS_DEBUG
+#if ERIKA_DEBUG
 	// Resolve which function signature macro will be used. Note that this only
 	// is resolved when the (pre)compiler starts, so the syntax highlighting
 	// could mark the wrong one in your editor!
