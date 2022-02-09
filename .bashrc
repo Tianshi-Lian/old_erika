@@ -1,1 +1,0 @@
-alias cli='./cli.bat'

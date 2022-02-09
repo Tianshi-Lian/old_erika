@@ -1,16 +1,3 @@
-workspace "erika"
-    startproject "erika"
-    architecture "x64"
-
-    configurations
-    {
-        "debug",
-        "release"
-    }
-
-tdir = "bin/%{cfg.system}-%{cfg.buildcfg}-%{cfg.architecture}/%{prj.name}"
-odir = "bin-int/%{cfg.system}-%{cfg.buildcfg}-%{cfg.architecture}/%{prj.name}"
-
 project "erika"
     location "erika"
     kind "StaticLib"
